@@ -1,10 +1,65 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, Depends, HTTPException
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 import sqlite3
 import hashlib
 import secrets
 import hmac
+import os
+import jwt
+from datetime import datetime, timedelta, timezone
+from dotenv import load_dotenv
+
+load_dotenv()
+
+SECRET_KEY = os.getenv("JWT_SECRET_KEY")
+
+if not SECRET_KEY:
+    raise RuntimeError("JWT_SECRET_KEY is missing from .env")
 
 app = FastAPI()
+
+security = HTTPBearer()
+
+
+def get_current_user(
+    credentials: HTTPAuthorizationCredentials = Depends(security)
+):
+    token = credentials.credentials
+
+    try:
+        payload = jwt.decode(
+            token,
+            SECRET_KEY,
+            algorithms=["HS256"]
+        )
+
+        user_id = payload.get("sub")
+
+        if user_id is None:
+            raise HTTPException(
+                status_code=401,
+                detail="Invalid authentication token"
+            )
+
+        return {
+            "user_id": int(user_id),
+            "username": payload.get("username")
+        }
+
+    except (jwt.InvalidTokenError, ValueError, TypeError):
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid or expired authentication token"
+        )
+
+@app.get("/me")
+def read_current_user(
+    current_user: dict = Depends(get_current_user)
+):
+    return {
+        "success": True,
+        "user": current_user
+    }
 
 @app.on_event("startup")
 def startup():
@@ -116,9 +171,8 @@ def list_users():
         "users": users
     }
 
-from pydantic import BaseModel
-from fastapi import HTTPException
 
+from pydantic import BaseModel
 
 class RegisterRequest(BaseModel):
     username: str
@@ -206,9 +260,26 @@ def login_user(user: LoginRequest):
             detail="Invalid username or password"
         )
 
+    now = datetime.now(timezone.utc)
+
+    payload = {
+        "sub": str(account["id"]),
+        "username": account["username"],
+        "iat": now,
+        "exp": now + timedelta(minutes=30)
+    }
+
+    access_token = jwt.encode(
+        payload,
+        SECRET_KEY,
+        algorithm="HS256"
+    )
+
     return {
         "success": True,
         "message": "Login successful",
         "user_id": account["id"],
-        "username": account["username"]
+        "username": account["username"],
+        "access_token": access_token,
+        "token_type": "bearer"
     }
