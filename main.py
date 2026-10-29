@@ -1,4 +1,5 @@
 from fastapi import FastAPI, Depends, HTTPException
+from pydantic import BaseModel
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 import sqlite3
 import hashlib
@@ -79,12 +80,26 @@ def create_tables():
         )
     """)
 
+    connection.execute("""
+        CREATE TABLE IF NOT EXISTS profiles (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER UNIQUE NOT NULL,
+            display_name TEXT,
+            bio TEXT DEFAULT '',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (user_id) REFERENCES users(id)
+        )
+    """)
+
     connection.commit()
     connection.close()
+
 
 def get_db_connection():
     connection = sqlite3.connect(DATABASE)
     connection.row_factory = sqlite3.Row
+    connection.execute("PRAGMA foreign_keys = ON")
     return connection
 
 
@@ -178,6 +193,13 @@ class RegisterRequest(BaseModel):
     username: str
     password: str
 
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
+class ProfileUpdateRequest(BaseModel):
+    display_name: str
+    bio: str = ""
 
 @app.post("/register")
 def register_user(user: RegisterRequest):
@@ -206,13 +228,22 @@ def register_user(user: RegisterRequest):
     connection = get_db_connection()
 
     try:
-        connection.execute(
+        cursor = connection.execute(
             "INSERT INTO users (username, password_hash) VALUES (?, ?)",
             (username, password_hash)
         )
+
+        user_id = cursor.lastrowid
+
+        connection.execute(
+            "INSERT INTO profiles (user_id, display_name) VALUES (?, ?)",
+            (user_id, username)
+        )
+
         connection.commit()
 
     except sqlite3.IntegrityError:
+        connection.rollback()
         raise HTTPException(
             status_code=409,
             detail="Username already exists"
@@ -226,11 +257,6 @@ def register_user(user: RegisterRequest):
         "message": "Account created successfully",
         "username": username
     }
-
-
-class LoginRequest(BaseModel):
-    username: str
-    password: str
 
 
 @app.post("/login")
@@ -282,4 +308,96 @@ def login_user(user: LoginRequest):
         "username": account["username"],
         "access_token": access_token,
         "token_type": "bearer"
+    }
+
+@app.get("/profile")
+def get_profile(
+    current_user: dict = Depends(get_current_user)
+):
+    connection = get_db_connection()
+
+    try:
+        cursor = connection.execute(
+            """
+            SELECT u.id, u.username, p.display_name, p.bio
+            FROM users u
+            LEFT JOIN profiles p ON p.user_id = u.id
+            WHERE u.id = ?
+            """,
+            (current_user["user_id"],)
+        )
+        profile = cursor.fetchone()
+
+    finally:
+        connection.close()
+
+    if profile is None:
+        raise HTTPException(
+            status_code=404,
+            detail="User account not found"
+        )
+
+    if profile["display_name"] is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Student profile not found"
+        )
+
+    return {
+        "success": True,
+        "profile": {
+            "user_id": profile["id"],
+            "username": profile["username"],
+            "display_name": profile["display_name"],
+            "bio": profile["bio"]
+        }
+    }
+
+@app.put("/profile")
+def update_profile(
+    profile_data: ProfileUpdateRequest,
+    current_user: dict = Depends(get_current_user)
+):
+    display_name = profile_data.display_name.strip()
+
+    if not display_name:
+        raise HTTPException(
+            status_code=400,
+            detail="Display name cannot be empty"
+        )
+
+    connection = get_db_connection()
+
+    try:
+        cursor = connection.execute(
+            """
+            UPDATE profiles
+            SET display_name = ?,
+                bio = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE user_id = ?
+            """,
+            (
+                display_name,
+                profile_data.bio.strip(),
+                current_user["user_id"]
+            )
+        )
+
+        connection.commit()
+
+        if cursor.rowcount == 0:
+            raise HTTPException(
+                status_code=404,
+                detail="Student profile not found"
+            )
+
+    finally:
+        connection.close()
+
+    return {
+        "success": True,
+        "message": "Profile updated successfully",
+        "display_name": display_name,
+        "bio": profile_data.bio.strip()
     }
