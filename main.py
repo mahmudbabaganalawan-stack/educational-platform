@@ -92,6 +92,16 @@ def create_tables():
         )
     """)
 
+    connection.execute("""
+        CREATE TABLE IF NOT EXISTS whatsapp_accounts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER UNIQUE NOT NULL,
+            whatsapp_id TEXT UNIQUE NOT NULL,
+            linked_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (user_id) REFERENCES users(id)
+        )
+    """)
+
     connection.commit()
     connection.close()
 
